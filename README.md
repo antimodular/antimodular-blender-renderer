@@ -106,13 +106,19 @@ dist/BlenderRenderGui
   --icon=path/to/icon.ico  # Windows
   --icon=path/to/icon.icns # macOS
   ```
-- Embed everything into a cleaner `.app` structure ... tbd (see and of Readme)
+- Embed everything into a cleaner `.app/installer` structure (see down below)
 
 ---
 
 # That's it! 🎉
 
 You now have a cross-platform drag-and-drop Blender background renderer!
+
+---
+
+### Optional: Building a polished installer
+- **macOS**: You can create a `.dmg` (drag-and-drop installer) using tools like `create-dmg`, or build a `.pkg` installer for system-wide installs.
+- **Windows**: Use tools like [Inno Setup](https://jrsoftware.org/isinfo.php) or `msi` builders like `wix` to wrap the `.exe` into a full installer.
 
 ---
 
@@ -124,9 +130,3 @@ You now have a cross-platform drag-and-drop Blender background renderer!
   ```
 - If your app doesn't open, ensure Blender's path is properly configured via the app's menu.
 - If you need to bundle additional files, use PyInstaller's `--add-data` option.
-
----
-
-### Building a polished installer or custom `.app`
-- **macOS**: You can create a `.dmg` (drag-and-drop installer) using tools like `create-dmg`, or build a `.pkg` installer for system-wide installs.
-- **Windows**: Use tools like [Inno Setup](https://jrsoftware.org/isinfo.php) or `msi` builders like `wix` to wrap the `.exe` into a full installer.
