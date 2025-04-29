@@ -127,5 +127,6 @@ You now have a cross-platform drag-and-drop Blender background renderer!
 
 ---
 
-Need help building a polished installer or custom `.app` bundle? Just ask!
-
+### Building a polished installer or custom `.app`
+- **macOS**: You can create a `.dmg` (drag-and-drop installer) using tools like `create-dmg`, or build a `.pkg` installer for system-wide installs.
+- **Windows**: Use tools like [Inno Setup](https://jrsoftware.org/isinfo.php) or `msi` builders like `wix` to wrap the `.exe` into a full installer.
