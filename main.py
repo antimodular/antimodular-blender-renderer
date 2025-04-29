@@ -67,6 +67,9 @@ class DragDropWindow(QMainWindow):
 
         self.cancel_button = QPushButton("Cancel Rendering")
         self.cancel_button.setEnabled(False)
+        self.cancel_button.setStyleSheet(
+            "background-color: lightgray; border-radius: 4px; padding: 5px; "
+        )
         self.cancel_button.clicked.connect(self.cancel_render)
         layout.addWidget(self.cancel_button)
 
@@ -76,6 +79,7 @@ class DragDropWindow(QMainWindow):
         self.total_frames = 250
         self.current_frame = 0
         self.output_dir = ""
+        self.image_format = "png"
         self.current_blend_file = ""
         self.crash_count = 0
 
@@ -138,7 +142,6 @@ class DragDropWindow(QMainWindow):
         if event.mimeData().hasUrls():
             file_path = event.mimeData().urls()[0].toLocalFile()
             if file_path.endswith(".blend"):
-                # output_dir will now be set later in probe_scene based on the .blend file
                 self.probe_scene(file_path)
                 self.adjust_start_frame_based_on_existing_output()
 
@@ -171,6 +174,7 @@ import bpy
 print("[PROBE] START_FRAME", bpy.context.scene.frame_start)
 print("[PROBE] END_FRAME", bpy.context.scene.frame_end)
 print("[PROBE] OUTPUT_DIR", bpy.path.abspath(bpy.context.scene.render.filepath))
+print("[PROBE] OUTPUT_FORMAT", bpy.context.scene.render.image_settings.file_format)
 exit()
 """
         )
@@ -183,6 +187,14 @@ exit()
         result = subprocess.run(args, capture_output=True, text=True)
         os.unlink(probe_script.name)
 
+        scene_basename = os.path.splitext(os.path.basename(blend_file))[0]
+        fallback_output = os.path.join(
+            os.path.dirname(blend_file), f"{scene_basename}_output"
+        )
+
+        self.output_dir = ""
+        self.image_format = "png"
+
         for line in result.stdout.splitlines():
             if "[PROBE] START_FRAME" in line:
                 self.start_frame = int(line.split()[-1])
@@ -192,10 +204,16 @@ exit()
                 output = line.split(" ", 2)[-1].strip()
                 if output and output != "//":
                     self.output_dir = output
-                    os.makedirs(self.output_dir, exist_ok=True)
+            elif "[PROBE] OUTPUT_FORMAT" in line:
+                fmt = line.split(" ", 2)[-1].strip()
+                if fmt:
+                    self.image_format = fmt.lower()
 
+        if not self.output_dir:
+            self.output_dir = fallback_output
+
+        os.makedirs(self.output_dir, exist_ok=True)
         self.total_frames = self.end_frame - self.start_frame + 1
-        print(f"Detected frame range: {self.start_frame} - {self.end_frame}")
 
     def adjust_start_frame_based_on_existing_output(self):
         if not self.output_dir:
@@ -204,10 +222,10 @@ exit()
         existing_frames = [
             f
             for f in os.listdir(self.output_dir)
-            if f.endswith(".png") and f.startswith("frame_")
+            if f.endswith(f".{self.image_format}") and f.startswith("frame_")
         ]
 
-        frame_pattern = re.compile(r"frame_(\d+)\.png")
+        frame_pattern = re.compile(r"frame_(\d+)\." + re.escape(self.image_format))
         max_frame = 0
 
         for filename in existing_frames:
@@ -220,9 +238,6 @@ exit()
         if max_frame >= self.start_frame:
             self.start_frame = max_frame + 1
             self.total_frames = self.end_frame - self.start_frame + 1
-            print(
-                f"[INFO] Adjusted start frame to {self.start_frame} based on existing output."
-            )
 
     def start_render(self, blend_file):
         if self.process:
@@ -263,6 +278,9 @@ exit()
         )
         self.current_frame = self.start_frame
         self.cancel_button.setEnabled(True)
+        self.cancel_button.setStyleSheet(
+            "background-color: salmon; font-weight: bold; border-radius: 4px; padding: 5px;"
+        )
         self.timer.start(100)
 
     def cancel_render(self):
@@ -271,6 +289,9 @@ exit()
             self.process = None
             self.timer.stop()
             self.cancel_button.setEnabled(False)
+            self.cancel_button.setStyleSheet(
+                "background-color: lightgray; border-radius: 4px; padding: 5px;"
+            )
             self.label.setText("Rendering cancelled. Drag a Blender file here")
             self.frame_counter.setText("Rendering cancelled.")
 
@@ -307,6 +328,9 @@ exit()
                     )
                     self.label.setText("Drag a Blender file here")
                     self.cancel_button.setEnabled(False)
+                    self.cancel_button.setStyleSheet(
+                        "background-color: lightgray; border-radius: 4px; padding: 5px; "
+                    )
                     self.process = None
 
         if self.process and self.process.poll() is not None:
@@ -321,6 +345,9 @@ exit()
                 self.progress.setValue(self.progress.maximum())
                 self.label.setText("Drag a Blender file here")
                 self.cancel_button.setEnabled(False)
+                self.cancel_button.setStyleSheet(
+                    "background-color: lightgray; border-radius: 4px; padding: 5px; "
+                )
                 self.process = None
             else:
                 self.crash_count += 1
