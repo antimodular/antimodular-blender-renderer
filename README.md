@@ -55,7 +55,7 @@ Activate it:
 Inside your virtual environment:
 
 ```bash
-pip install PySide6 pyinstaller
+pip install -r requirements.txt
 ```
 
 ---
