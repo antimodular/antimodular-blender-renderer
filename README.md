@@ -106,7 +106,7 @@ dist/BlenderRenderGui
   --icon=path/to/icon.ico  # Windows
   --icon=path/to/icon.icns # macOS
   ```
-- Embed everything into a cleaner `.app` structure (ask if you need it!)
+- Embed everything into a cleaner `.app` structure ... tbd (see and of Readme)
 
 ---
 
