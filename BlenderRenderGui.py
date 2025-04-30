@@ -2,7 +2,6 @@ import sys
 import os
 import json
 import platform
-import subprocess
 import tempfile
 import re
 from pathlib import Path
@@ -12,7 +11,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QFileDialog,
     QMessageBox,
-    QMenuBar,
     QMenu,
     QWidget,
     QVBoxLayout,
@@ -20,7 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QProcess
 
 CONFIG_FILE = "config.json"
 
@@ -87,11 +85,11 @@ class DragDropWindow(QMainWindow):
         self.current_blend_file = ""
         self.crash_count = 0
 
+        self.probe_process = None
+        self._probe_script_path = ""
+
         self.config = load_config()
         self.check_blender_installation()
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.check_process_output)
 
         self.is_windows = platform.system() == "Windows"
         self.is_macos = platform.system() == "Darwin"
@@ -110,11 +108,9 @@ class DragDropWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Blender Executable", "", filter_text
         )
-
         if path:
             if self.is_macos and path.endswith(".app"):
                 path = os.path.join(path, "Contents", "MacOS", "Blender")
-
             self.config["blender_path"] = path
             save_config(self.config)
             QMessageBox.information(
@@ -143,27 +139,10 @@ class DragDropWindow(QMainWindow):
                 self, "Setup Required", "Please setup a valid Blender path first!"
             )
             return
-
         if event.mimeData().hasUrls():
             file_path = event.mimeData().urls()[0].toLocalFile()
             if file_path.endswith(".blend"):
                 self.probe_scene(file_path)
-                self.adjust_start_frame_based_on_existing_output()
-
-                if self.start_frame > self.end_frame:
-                    QMessageBox.information(
-                        self,
-                        "Already Rendered",
-                        "All frames of this scene are already rendered.",
-                    )
-                    return
-
-                self.label.setText(
-                    f"Processing {os.path.basename(file_path)} currently"
-                )
-                self.current_blend_file = file_path
-                self.crash_count = 0
-                self.start_render(file_path)
             else:
                 QMessageBox.warning(
                     self, "Invalid File", "Please drop a valid .blend file."
@@ -172,7 +151,12 @@ class DragDropWindow(QMainWindow):
             event.ignore()
 
     def probe_scene(self, blend_file):
-        script_text = """
+        self._probe_script_path = tempfile.NamedTemporaryFile(
+            delete=False, suffix=".py", mode="w", encoding="utf8"
+        ).name
+        with open(self._probe_script_path, "w", encoding="utf8") as f:
+            f.write(
+                """
 import bpy
 print("[PROBE] START_FRAME", bpy.context.scene.frame_start)
 print("[PROBE] END_FRAME", bpy.context.scene.frame_end)
@@ -180,32 +164,41 @@ print("[PROBE] OUTPUT_DIR", bpy.path.abspath(bpy.context.scene.render.filepath))
 print("[PROBE] OUTPUT_FORMAT", bpy.context.scene.render.image_settings.file_format)
 exit()
 """
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=".py", mode="w", encoding="utf8"
-        ) as probe_script:
-            probe_script.write(script_text)
+            )
 
+        self.probe_output_lines = []
         blender_path = self.config.get("blender_path", "")
-        args = [blender_path, "-b", blend_file, "-P", probe_script.name]
-        encoding = "utf8" if self.is_macos else "cp1252"
+        self.probe_process = QProcess(self)
+        self.probe_process.readyReadStandardOutput.connect(self.read_probe_output)
+        self.probe_process.finished.connect(lambda: self.parse_probe_output(blend_file))
 
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            shell=False,
-            encoding=encoding,
-            errors="replace",
-        )
-        os.remove(probe_script.name)
+        args = ["-b", blend_file, "-P", self._probe_script_path]
+        self.probe_process.setProgram(blender_path)
+        self.probe_process.setArguments(args)
+        self.probe_process.start()
+
+    def read_probe_output(self):
+        if not self.probe_process:
+            return
+        while self.probe_process.canReadLine():
+            line = bytes(self.probe_process.readLine()).decode(errors="replace").strip()
+            print("[PROBE]", line)
+            self.probe_output_lines.append(line)
+
+    def parse_probe_output(self, blend_file):
+        if self._probe_script_path and os.path.exists(self._probe_script_path):
+            os.remove(self._probe_script_path)
+            self._probe_script_path = ""
 
         scene_basename = Path(blend_file).stem
         fallback_output = str(Path(blend_file).with_name(f"{scene_basename}_output"))
 
+        self.start_frame = 1
+        self.end_frame = 250
         self.output_dir = ""
         self.image_format = "png"
 
-        for line in result.stdout.splitlines():
+        for line in self.probe_output_lines:
             if "[PROBE] START_FRAME" in line:
                 self.start_frame = int(line.split()[-1])
             elif "[PROBE] END_FRAME" in line:
@@ -221,30 +214,41 @@ exit()
 
         if not self.output_dir:
             self.output_dir = fallback_output
-
         self.output_dir = os.path.abspath(self.output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
         self.total_frames = self.end_frame - self.start_frame + 1
 
+        self.adjust_start_frame_based_on_existing_output()
+
+        if self.start_frame > self.end_frame:
+            QMessageBox.information(
+                self,
+                "Already Rendered",
+                "All frames of this scene are already rendered.",
+            )
+            self.label.setText("Drag a Blender file here")
+            return
+
+        self.label.setText(f"Processing {os.path.basename(blend_file)} currently")
+        self.current_blend_file = blend_file
+        self.crash_count = 0
+        self.start_render(blend_file)
+
     def adjust_start_frame_based_on_existing_output(self):
         if not self.output_dir:
             return
-
         existing_frames = [
             f
             for f in os.listdir(self.output_dir)
             if f.endswith(f".{self.image_format}") and f.startswith("frame_")
         ]
-
-        frame_pattern = re.compile(rf"frame_(\\d+)\\.{re.escape(self.image_format)}")
+        frame_pattern = re.compile(rf"frame_(\d+)\.{re.escape(self.image_format)}")
         max_frame = 0
-
         for filename in existing_frames:
             match = frame_pattern.match(filename)
             if match:
                 frame_num = int(match.group(1))
                 max_frame = max(max_frame, frame_num)
-
         if max_frame >= self.start_frame:
             self.start_frame = max_frame + 1
             self.total_frames = self.end_frame - self.start_frame + 1
@@ -256,7 +260,6 @@ exit()
 
         blender_path = self.config.get("blender_path", "")
         render_script = os.path.join(os.getcwd(), "render_script.py")
-
         args = [
             blender_path,
             "-b",
@@ -272,13 +275,12 @@ exit()
             "true",
         ]
 
-        self.process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=1,
-            universal_newlines=True,
-        )
+        self.process = QProcess(self)
+        self.process.setProgram(blender_path)
+        self.process.setArguments(args[1:])
+        self.process.readyReadStandardOutput.connect(self.handle_stdout)
+        self.process.finished.connect(self.render_finished)
+        self.process.start()
 
         self.progress.setMinimum(0)
         self.progress.setMaximum(self.total_frames)
@@ -291,25 +293,14 @@ exit()
         self.cancel_button.setStyleSheet(
             "background-color: salmon; font-weight: bold; border-radius: 4px; padding: 5px;"
         )
-        self.timer.start(100)
 
-    def cancel_render(self):
-        if self.process:
-            self.process.terminate()
-            self.process = None
-            self.timer.stop()
-            self.cancel_button.setEnabled(False)
-            self.cancel_button.setStyleSheet(
-                "background-color: lightgray; border-radius: 4px; padding: 5px;"
-            )
-            self.label.setText("Rendering cancelled. Drag a Blender file here")
-            self.frame_counter.setText("Rendering cancelled.")
-
-    def check_process_output(self):
-        if self.process and self.process.stdout:
-            line = self.process.stdout.readline()
-            if line:
-                print(line.strip())
+    def handle_stdout(self):
+        if not self.process or self.process.state() != QProcess.Running:
+            return
+        try:
+            while self.process.canReadLine():
+                line = bytes(self.process.readLine()).decode(errors="replace").strip()
+                print(line)
                 if "Fra:" in line:
                     try:
                         fra_index = line.find("Fra:")
@@ -325,21 +316,13 @@ exit()
                     except Exception as e:
                         print(f"[ERROR parsing Fra:]: {e}")
                 if "[DONE]" in line:
-                    self.finish_render()
+                    self.render_finished()
+        except:
+            print("Something threw an error while reading the output.")
 
-        if self.process and self.process.poll() is not None:
-            self.timer.stop()
-            if self.current_frame >= self.end_frame:
-                self.finish_render()
-            else:
-                self.crash_count += 1
-                print(
-                    f"[CRASH DETECTED] Restarting render (crash #{self.crash_count})..."
-                )
-                self.process = None
-                self.start_render(self.current_blend_file)
-
-    def finish_render(self):
+    def render_finished(self):
+        if not self.process:
+            return
         self.progress.setValue(self.progress.maximum())
         self.frame_counter.setText(
             f"Rendering finished!\n\n{self.end_frame - self.start_frame + 1} frames rendered to:\n{self.output_dir}\nCrashes: {self.crash_count}"
@@ -350,6 +333,17 @@ exit()
             "background-color: lightgray; border-radius: 4px; padding: 5px;"
         )
         self.process = None
+
+    def cancel_render(self):
+        if self.process:
+            self.process.kill()
+            self.process = None
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.setStyleSheet(
+                "background-color: lightgray; border-radius: 4px; padding: 5px;"
+            )
+            self.label.setText("Rendering cancelled. Drag a Blender file here")
+            self.frame_counter.setText("Rendering cancelled.")
 
 
 if __name__ == "__main__":
