@@ -5,6 +5,7 @@ import platform
 import subprocess
 import tempfile
 import re
+from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -45,6 +46,9 @@ class DragDropWindow(QMainWindow):
         self.setWindowTitle("Blender Drag & Drop Renderer")
         self.resize(500, 450)
 
+        self.menu_bar = self.menuBar()
+        self.setup_menu()
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout()
@@ -68,7 +72,7 @@ class DragDropWindow(QMainWindow):
         self.cancel_button = QPushButton("Cancel Rendering")
         self.cancel_button.setEnabled(False)
         self.cancel_button.setStyleSheet(
-            "background-color: lightgray; border-radius: 4px; padding: 5px; "
+            "background-color: lightgray; border-radius: 4px; padding: 5px;"
         )
         self.cancel_button.clicked.connect(self.cancel_render)
         layout.addWidget(self.cancel_button)
@@ -84,30 +88,31 @@ class DragDropWindow(QMainWindow):
         self.crash_count = 0
 
         self.config = load_config()
-
-        self.setup_menu()
         self.check_blender_installation()
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.check_process_output)
 
-    def setup_menu(self):
-        menu_bar = self.menuBar()
-        setup_menu = menu_bar.addMenu("Setup")
+        self.is_windows = platform.system() == "Windows"
+        self.is_macos = platform.system() == "Darwin"
 
+    def setup_menu(self):
+        setup_menu = QMenu("Setup", self)
         choose_blender_action = QAction("Choose Blender Path", self)
         choose_blender_action.triggered.connect(self.choose_blender_path)
         setup_menu.addAction(choose_blender_action)
+        self.menu_bar.addMenu(setup_menu)
 
     def choose_blender_path(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Blender Executable",
-            "",
-            "Blender App (*.app *.exe);;All Files (*)",
+        filter_text = (
+            "Blender Executable (*.exe)" if self.is_windows else "Blender App (*.app)"
         )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Blender Executable", "", filter_text
+        )
+
         if path:
-            if platform.system() == "Darwin" and path.endswith(".app"):
+            if self.is_macos and path.endswith(".app"):
                 path = os.path.join(path, "Contents", "MacOS", "Blender")
 
             self.config["blender_path"] = path
@@ -167,9 +172,7 @@ class DragDropWindow(QMainWindow):
             event.ignore()
 
     def probe_scene(self, blend_file):
-        probe_script = tempfile.NamedTemporaryFile(delete=False, suffix=".py")
-        probe_script.write(
-            b"""
+        script_text = """
 import bpy
 print("[PROBE] START_FRAME", bpy.context.scene.frame_start)
 print("[PROBE] END_FRAME", bpy.context.scene.frame_end)
@@ -177,20 +180,27 @@ print("[PROBE] OUTPUT_DIR", bpy.path.abspath(bpy.context.scene.render.filepath))
 print("[PROBE] OUTPUT_FORMAT", bpy.context.scene.render.image_settings.file_format)
 exit()
 """
-        )
-        probe_script.close()
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=".py", mode="w", encoding="utf8"
+        ) as probe_script:
+            probe_script.write(script_text)
 
         blender_path = self.config.get("blender_path", "")
-
         args = [blender_path, "-b", blend_file, "-P", probe_script.name]
+        encoding = "utf8" if self.is_macos else "cp1252"
 
-        result = subprocess.run(args, capture_output=True, text=True)
-        os.unlink(probe_script.name)
-
-        scene_basename = os.path.splitext(os.path.basename(blend_file))[0]
-        fallback_output = os.path.join(
-            os.path.dirname(blend_file), f"{scene_basename}_output"
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            shell=False,
+            encoding=encoding,
+            errors="replace",
         )
+        os.remove(probe_script.name)
+
+        scene_basename = Path(blend_file).stem
+        fallback_output = str(Path(blend_file).with_name(f"{scene_basename}_output"))
 
         self.output_dir = ""
         self.image_format = "png"
@@ -212,6 +222,7 @@ exit()
         if not self.output_dir:
             self.output_dir = fallback_output
 
+        self.output_dir = os.path.abspath(self.output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
         self.total_frames = self.end_frame - self.start_frame + 1
 
@@ -225,15 +236,14 @@ exit()
             if f.endswith(f".{self.image_format}") and f.startswith("frame_")
         ]
 
-        frame_pattern = re.compile(r"frame_(\d+)\." + re.escape(self.image_format))
+        frame_pattern = re.compile(rf"frame_(\\d+)\\.{re.escape(self.image_format)}")
         max_frame = 0
 
         for filename in existing_frames:
             match = frame_pattern.match(filename)
             if match:
                 frame_num = int(match.group(1))
-                if frame_num > max_frame:
-                    max_frame = frame_num
+                max_frame = max(max_frame, frame_num)
 
         if max_frame >= self.start_frame:
             self.start_frame = max_frame + 1
@@ -300,14 +310,12 @@ exit()
             line = self.process.stdout.readline()
             if line:
                 print(line.strip())
-
                 if "Fra:" in line:
                     try:
                         fra_index = line.find("Fra:")
                         rest = line[fra_index + 4 :]
                         frame_num_str = rest.split()[0]
                         frame_num = int(frame_num_str)
-
                         self.current_frame = frame_num
                         progress = self.current_frame - self.start_frame
                         self.progress.setValue(progress)
@@ -316,39 +324,13 @@ exit()
                         )
                     except Exception as e:
                         print(f"[ERROR parsing Fra:]: {e}")
-
                 if "[DONE]" in line:
-                    self.timer.stop()
-                    self.progress.setValue(self.progress.maximum())
-                    self.frame_counter.setText(
-                        f"Rendering finished!\n\n"
-                        f"{self.end_frame - self.start_frame + 1} frames rendered to:\n"
-                        f"{self.output_dir}\n"
-                        f"Crashes: {self.crash_count}"
-                    )
-                    self.label.setText("Drag a Blender file here")
-                    self.cancel_button.setEnabled(False)
-                    self.cancel_button.setStyleSheet(
-                        "background-color: lightgray; border-radius: 4px; padding: 5px; "
-                    )
-                    self.process = None
+                    self.finish_render()
 
         if self.process and self.process.poll() is not None:
             self.timer.stop()
             if self.current_frame >= self.end_frame:
-                self.frame_counter.setText(
-                    f"Rendering finished!\n\n"
-                    f"{self.end_frame - self.start_frame + 1} frames rendered to:\n"
-                    f"{self.output_dir}\n"
-                    f"Crashes: {self.crash_count}"
-                )
-                self.progress.setValue(self.progress.maximum())
-                self.label.setText("Drag a Blender file here")
-                self.cancel_button.setEnabled(False)
-                self.cancel_button.setStyleSheet(
-                    "background-color: lightgray; border-radius: 4px; padding: 5px; "
-                )
-                self.process = None
+                self.finish_render()
             else:
                 self.crash_count += 1
                 print(
@@ -356,6 +338,18 @@ exit()
                 )
                 self.process = None
                 self.start_render(self.current_blend_file)
+
+    def finish_render(self):
+        self.progress.setValue(self.progress.maximum())
+        self.frame_counter.setText(
+            f"Rendering finished!\n\n{self.end_frame - self.start_frame + 1} frames rendered to:\n{self.output_dir}\nCrashes: {self.crash_count}"
+        )
+        self.label.setText("Drag a Blender file here")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setStyleSheet(
+            "background-color: lightgray; border-radius: 4px; padding: 5px;"
+        )
+        self.process = None
 
 
 if __name__ == "__main__":
