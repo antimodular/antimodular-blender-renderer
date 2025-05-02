@@ -4,6 +4,8 @@ import json
 import platform
 import tempfile
 import re
+import time
+import datetime
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
@@ -111,6 +113,10 @@ class DragDropWindow(QMainWindow):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
 
+        self.stats_label = QLabel("Render statistics will appear here")
+        self.stats_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.stats_label)
+
         self.frame_counter = QLabel("No rendering yet.")
         self.frame_counter.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.frame_counter)
@@ -139,6 +145,11 @@ class DragDropWindow(QMainWindow):
         # File queue management
         self.file_queue = []
         self.currently_rendering = False
+
+        # Rendering time tracking
+        self.render_start_time = 0
+        self.frame_start_time = 0
+        self.frame_times = []
 
         self.config = load_config()
         self.check_blender_installation()
@@ -404,6 +415,11 @@ exit()
             QMessageBox.warning(self, "Render In Progress", "Already rendering!")
             return
 
+        # Initialize time tracking for this render
+        self.render_start_time = time.time()
+        self.frame_start_time = time.time()
+        self.frame_times = []
+
         blender_path = self.config.get("blender_path", "")
         render_script = os.path.join(os.getcwd(), "render_script.py")
         args = [
@@ -453,18 +469,79 @@ exit()
                         rest = line[fra_index + 4 :]
                         frame_num_str = rest.split()[0]
                         frame_num = int(frame_num_str)
-                        self.current_frame = frame_num
+
+                        # If frame number changed, record frame time
+                        if self.current_frame != frame_num:
+                            if self.current_frame > 0:  # Not first frame
+                                # Record the time for previous frame
+                                frame_time = time.time() - self.frame_start_time
+                                self.frame_times.append(frame_time)
+
+                            # Start timing for new frame
+                            self.frame_start_time = time.time()
+                            self.current_frame = frame_num
+
                         progress = self.current_frame - self.start_frame
                         self.progress.setValue(progress)
                         self.frame_counter.setText(
                             f"Rendering frame {self.current_frame}/{self.end_frame} | Crashes: {self.crash_count}"
                         )
+
+                        # Update time statistics
+                        self.update_time_statistics()
                     except Exception as e:
                         print(f"[ERROR parsing Fra:]: {e}")
                 if "[DONE]" in line:
                     self.render_finished()
-        except:
-            print("Something threw an error while reading the output.")
+        except Exception as e:
+            print(f"Something threw an error while reading the output: {e}")
+
+    def update_time_statistics(self):
+        # Need at least one completed frame for calculations
+        if not self.frame_times:
+            self.stats_label.setText("Calculating render statistics...")
+            return
+
+        # Calculate averages and estimates
+        avg_frame_time = sum(self.frame_times) / len(self.frame_times)
+        elapsed_time = time.time() - self.render_start_time
+
+        # Estimate remaining time
+        frames_done = len(self.frame_times)
+        frames_remaining = self.total_frames - frames_done
+        estimated_remaining_seconds = frames_remaining * avg_frame_time
+
+        # Format times for display
+        def format_time(seconds):
+            if seconds < 60:
+                return f"{seconds:.1f} seconds"
+            elif seconds < 3600:
+                minutes = seconds / 60
+                return f"{minutes:.1f} minutes"
+            else:
+                hours = seconds / 3600
+                return f"{hours:.1f} hours"
+
+        elapsed_str = format_time(elapsed_time)
+        remaining_str = format_time(estimated_remaining_seconds)
+        avg_frame_str = format_time(avg_frame_time)
+
+        # Estimate completion time
+        completion_time = time.time() + estimated_remaining_seconds
+        completion_time_str = datetime.datetime.fromtimestamp(completion_time).strftime(
+            "%H:%M:%S"
+        )
+
+        # Update statistics label
+        stats = (
+            f"Render Statistics:\n"
+            f"Average: {avg_frame_str} per frame | "
+            f"Elapsed: {elapsed_str} | "
+            f"Remaining: {remaining_str}\n"
+            f"Estimated completion at: {completion_time_str}"
+        )
+
+        self.stats_label.setText(stats)
 
     def render_finished(self):
         if not self.process:
