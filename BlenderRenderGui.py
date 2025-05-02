@@ -549,21 +549,24 @@ exit()
 
         self.progress.setValue(self.progress.maximum())
 
-        # Update status for the completed file in the queue list
+        # Calculate total render time and format it nicely
+        total_render_time = time.time() - self.render_start_time
+        formatted_time = self.format_time_short(total_render_time)
+        frames_rendered = self.end_frame - self.start_frame + 1
+
+        # Update status for the completed file in the queue list with detailed stats
         for i in range(self.queue_list.count()):
             item = self.queue_list.item(i)
             widget = self.queue_list.itemWidget(item)
             if widget and widget.file_path == self.current_blend_file:
                 widget.label.setText(
-                    f"{os.path.basename(self.current_blend_file)} (Completed)"
+                    f"{os.path.basename(self.current_blend_file)} (Completed - {frames_rendered} frames, {formatted_time}, {self.crash_count} crashes)"
                 )
                 widget.label.setStyleSheet("color: blue;")
-                # Keep the completed items in the list as a history
-                # (optionally could add a "clear completed" function later)
                 break
 
         self.frame_counter.setText(
-            f"Rendering finished!\n\n{self.end_frame - self.start_frame + 1} frames rendered to:\n{self.output_dir}\nCrashes: {self.crash_count}"
+            f"Rendering finished!\n\n{frames_rendered} frames rendered to:\n{self.output_dir}\nCrashes: {self.crash_count}"
         )
 
         self.cancel_button.setEnabled(False)
@@ -606,6 +609,19 @@ exit()
             self.currently_rendering = False
             self.current_blend_file = ""
             self.process_next_file()
+
+    def format_time_short(self, seconds):
+        """Format time in a compact way for the queue list display"""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+        else:
+            hours = int(seconds / 3600)
+            minutes = int((seconds % 3600) / 60)
+            return f"{hours}h {minutes}m"
 
 
 if __name__ == "__main__":
