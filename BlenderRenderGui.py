@@ -16,9 +16,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QProgressBar,
     QPushButton,
+    QListWidget,
+    QListWidgetItem,
+    QHBoxLayout,
+    QFrame,
+    QToolButton,
+    QSplitter,
 )
-from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QProcess
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt, QProcess, QSize
 
 CONFIG_FILE = "config.json"
 
@@ -38,11 +44,36 @@ def save_config(data):
         json.dump(data, f, indent=4)
 
 
+class QueueItemWidget(QWidget):
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        layout = QHBoxLayout()
+        layout.setContentsMargins(5, 2, 5, 2)
+        self.setLayout(layout)
+
+        # File path label
+        file_name = os.path.basename(file_path)
+        self.label = QLabel(f"{file_name}")
+        self.label.setToolTip(file_path)
+        layout.addWidget(self.label, 1)  # 1 = stretch factor
+
+        # Remove button
+        self.remove_btn = QToolButton()
+        self.remove_btn.setText("✕")
+        self.remove_btn.setToolTip("Remove from queue")
+        self.remove_btn.setStyleSheet(
+            "QToolButton { border: none; color: red; font-weight: bold; }"
+            "QToolButton:hover { background-color: #ffeeee; }"
+        )
+        layout.addWidget(self.remove_btn)
+
+
 class DragDropWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Blender Drag & Drop Renderer")
-        self.resize(500, 450)
+        self.resize(600, 650)  # Increased window size to accommodate queue list
 
         self.menu_bar = self.menuBar()
         self.setup_menu()
@@ -52,12 +83,29 @@ class DragDropWindow(QMainWindow):
         layout = QVBoxLayout()
         central_widget.setLayout(layout)
 
-        self.label = QLabel("Drag a Blender file here")
+        self.label = QLabel("Drag one or more Blender files here")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet(
             "border: 2px dashed gray; font-size: 16px; padding: 40px;"
         )
         layout.addWidget(self.label)
+
+        # File queue section
+        queue_section = QFrame()
+        queue_section.setFrameShape(QFrame.StyledPanel)
+        queue_layout = QVBoxLayout()
+        queue_section.setLayout(queue_layout)
+
+        queue_header = QLabel("File Queue")
+        queue_header.setStyleSheet("font-weight: bold; font-size: 14px;")
+        queue_layout.addWidget(queue_header)
+
+        self.queue_list = QListWidget()
+        self.queue_list.setMinimumHeight(150)
+        self.queue_list.setAlternatingRowColors(True)
+        queue_layout.addWidget(self.queue_list)
+
+        layout.addWidget(queue_section)
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
@@ -87,6 +135,10 @@ class DragDropWindow(QMainWindow):
 
         self.probe_process = None
         self._probe_script_path = ""
+
+        # File queue management
+        self.file_queue = []
+        self.currently_rendering = False
 
         self.config = load_config()
         self.check_blender_installation()
@@ -139,16 +191,87 @@ class DragDropWindow(QMainWindow):
                 self, "Setup Required", "Please setup a valid Blender path first!"
             )
             return
+
         if event.mimeData().hasUrls():
-            file_path = event.mimeData().urls()[0].toLocalFile()
-            if file_path.endswith(".blend"):
-                self.probe_scene(file_path)
-            else:
+            dropped_files = [url.toLocalFile() for url in event.mimeData().urls()]
+            blend_files = [f for f in dropped_files if f.endswith(".blend")]
+
+            if not blend_files:
                 QMessageBox.warning(
-                    self, "Invalid File", "Please drop a valid .blend file."
+                    self, "Invalid Files", "Please drop valid .blend files."
                 )
+                return
+
+            # Add files to queue
+            for blend_file in blend_files:
+                self.add_file_to_queue(blend_file)
+
+            # Start processing if not already rendering
+            if not self.currently_rendering:
+                self.process_next_file()
         else:
             event.ignore()
+
+    def add_file_to_queue(self, blend_file):
+        # Check if file is already in queue
+        if blend_file in self.file_queue:
+            return
+
+        # Add to internal queue
+        self.file_queue.append(blend_file)
+
+        # Create and add queue item widget
+        item_widget = QueueItemWidget(blend_file)
+        item = QListWidgetItem(self.queue_list)
+        item.setSizeHint(item_widget.sizeHint())
+        self.queue_list.addItem(item)
+        self.queue_list.setItemWidget(item, item_widget)
+
+        # Connect remove button to remove function
+        item_widget.remove_btn.clicked.connect(
+            lambda: self.remove_file_from_queue(item, blend_file)
+        )
+
+        # Update UI
+        status_text = "Ready to render" if not self.currently_rendering else "Queued"
+        item_widget.label.setText(f"{os.path.basename(blend_file)} ({status_text})")
+
+    def remove_file_from_queue(self, item, blend_file):
+        if blend_file == self.current_blend_file and self.currently_rendering:
+            QMessageBox.warning(
+                self,
+                "File In Use",
+                f"Cannot remove {os.path.basename(blend_file)} while it's being rendered.",
+            )
+            return
+
+        # Remove from list widget and internal queue
+        row = self.queue_list.row(item)
+        self.queue_list.takeItem(row)
+
+        if blend_file in self.file_queue:
+            self.file_queue.remove(blend_file)
+
+    def process_next_file(self):
+        if not self.file_queue:
+            self.currently_rendering = False
+            self.label.setText("Drag one or more Blender files here")
+            return
+
+        self.currently_rendering = True
+        next_file = self.file_queue[0]
+        self.file_queue.pop(0)
+
+        # Update UI to show which file is now rendering
+        for i in range(self.queue_list.count()):
+            item = self.queue_list.item(i)
+            widget = self.queue_list.itemWidget(item)
+            if widget and widget.file_path == next_file:
+                widget.label.setText(f"{os.path.basename(next_file)} (Rendering...)")
+                widget.label.setStyleSheet("font-weight: bold; color: green;")
+                break
+
+        self.probe_scene(next_file)
 
     def probe_scene(self, blend_file):
         self._probe_script_path = tempfile.NamedTemporaryFile(
@@ -190,8 +313,10 @@ exit()
             os.remove(self._probe_script_path)
             self._probe_script_path = ""
 
+        # Get the directory and basename of the blend file for creating the default output folder
+        scene_dir = os.path.dirname(blend_file)
         scene_basename = Path(blend_file).stem
-        fallback_output = str(Path(blend_file).with_name(f"{scene_basename}_output"))
+        fallback_output = os.path.join(scene_dir, f"{scene_basename}_output")
 
         self.start_frame = 1
         self.end_frame = 250
@@ -212,21 +337,42 @@ exit()
                 if fmt:
                     self.image_format = fmt.lower()
 
-        if not self.output_dir:
+        if not self.output_dir or self.output_dir == "//":
             self.output_dir = fallback_output
-        self.output_dir = os.path.abspath(self.output_dir)
+        else:
+            # If the path starts with //, it's relative to the blend file directory
+            if self.output_dir.startswith("//"):
+                self.output_dir = os.path.normpath(
+                    os.path.join(scene_dir, self.output_dir[2:])
+                )
+            # Ensure we have an absolute path
+            elif not os.path.isabs(self.output_dir):
+                self.output_dir = os.path.normpath(
+                    os.path.join(scene_dir, self.output_dir)
+                )
+            # Convert the path to an absolute path
+            self.output_dir = os.path.abspath(self.output_dir)
+
         os.makedirs(self.output_dir, exist_ok=True)
         self.total_frames = self.end_frame - self.start_frame + 1
 
         self.adjust_start_frame_based_on_existing_output()
 
         if self.start_frame > self.end_frame:
-            QMessageBox.information(
-                self,
-                "Already Rendered",
-                "All frames of this scene are already rendered.",
-            )
-            self.label.setText("Drag a Blender file here")
+            # Update UI to show this file was already rendered
+            for i in range(self.queue_list.count()):
+                item = self.queue_list.item(i)
+                widget = self.queue_list.itemWidget(item)
+                if widget and widget.file_path == blend_file:
+                    widget.label.setText(
+                        f"{os.path.basename(blend_file)} (Already rendered)"
+                    )
+                    widget.label.setStyleSheet("color: gray; font-style: italic;")
+                    break
+
+            # Move to next file in queue
+            self.currently_rendering = False
+            self.process_next_file()
             return
 
         self.label.setText(f"Processing {os.path.basename(blend_file)} currently")
@@ -323,16 +469,39 @@ exit()
     def render_finished(self):
         if not self.process:
             return
+
         self.progress.setValue(self.progress.maximum())
+
+        # Update status for the completed file in the queue list
+        for i in range(self.queue_list.count()):
+            item = self.queue_list.item(i)
+            widget = self.queue_list.itemWidget(item)
+            if widget and widget.file_path == self.current_blend_file:
+                widget.label.setText(
+                    f"{os.path.basename(self.current_blend_file)} (Completed)"
+                )
+                widget.label.setStyleSheet("color: blue;")
+                # Keep the completed items in the list as a history
+                # (optionally could add a "clear completed" function later)
+                break
+
         self.frame_counter.setText(
             f"Rendering finished!\n\n{self.end_frame - self.start_frame + 1} frames rendered to:\n{self.output_dir}\nCrashes: {self.crash_count}"
         )
-        self.label.setText("Drag a Blender file here")
+
         self.cancel_button.setEnabled(False)
         self.cancel_button.setStyleSheet(
             "background-color: lightgray; border-radius: 4px; padding: 5px;"
         )
+
         self.process = None
+        self.currently_rendering = False
+
+        # Process next file in queue if any
+        self.process_next_file()
+
+        if not self.currently_rendering:
+            self.label.setText("Drag one or more Blender files here")
 
     def cancel_render(self):
         if self.process:
@@ -342,8 +511,24 @@ exit()
             self.cancel_button.setStyleSheet(
                 "background-color: lightgray; border-radius: 4px; padding: 5px;"
             )
-            self.label.setText("Rendering cancelled. Drag a Blender file here")
+            self.label.setText("Drag one or more Blender files here")
             self.frame_counter.setText("Rendering cancelled.")
+
+            # Update queue item status
+            for i in range(self.queue_list.count()):
+                item = self.queue_list.item(i)
+                widget = self.queue_list.itemWidget(item)
+                if widget and widget.file_path == self.current_blend_file:
+                    widget.label.setText(
+                        f"{os.path.basename(self.current_blend_file)} (Cancelled)"
+                    )
+                    widget.label.setStyleSheet("color: red;")
+                    break
+
+            # Process next file in queue after a short delay
+            self.currently_rendering = False
+            self.current_blend_file = ""
+            self.process_next_file()
 
 
 if __name__ == "__main__":
