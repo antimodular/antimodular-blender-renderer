@@ -6,6 +6,8 @@ import tempfile
 import re
 import time
 import datetime
+import traceback
+import logging
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
@@ -144,6 +146,7 @@ class DragDropWindow(QMainWindow):
 
         # File queue management
         self.file_queue = []
+        self.queue_items = {}  # Dictionary to track all queue items by file path
         self.currently_rendering = False
 
         # Rendering time tracking
@@ -225,7 +228,33 @@ class DragDropWindow(QMainWindow):
 
     def add_file_to_queue(self, blend_file):
         # Check if file is already in queue
-        if blend_file in self.file_queue:
+        existing_item = None
+        already_queued = False
+
+        # Check if this file has already been queued
+        for i in range(self.queue_list.count()):
+            item = self.queue_list.item(i)
+            widget = self.queue_list.itemWidget(item)
+            if widget and widget.file_path == blend_file:
+                # Found existing item for this file
+                already_queued = True
+                existing_item = item
+
+        if already_queued:
+            # File already queued, update status if not currently rendering
+            widget = self.queue_list.itemWidget(existing_item)
+            if self.current_blend_file != blend_file:
+                if blend_file not in self.file_queue:
+                    # Add to queue if not already there
+                    self.file_queue.append(blend_file)
+                    status_text = (
+                        "Ready to render" if not self.currently_rendering else "Queued"
+                    )
+                    widget.label.setText(
+                        f"{os.path.basename(blend_file)} ({status_text})"
+                    )
+                    # Reset styling
+                    widget.label.setStyleSheet("")
             return
 
         # Add to internal queue
@@ -237,6 +266,9 @@ class DragDropWindow(QMainWindow):
         item.setSizeHint(item_widget.sizeHint())
         self.queue_list.addItem(item)
         self.queue_list.setItemWidget(item, item_widget)
+
+        # Store reference to item in our tracking dictionary
+        self.queue_items[blend_file] = item
 
         # Connect remove button to remove function
         item_widget.remove_btn.clicked.connect(
@@ -262,6 +294,10 @@ class DragDropWindow(QMainWindow):
 
         if blend_file in self.file_queue:
             self.file_queue.remove(blend_file)
+
+        # Remove from tracking dictionary if present
+        if blend_file in self.queue_items:
+            del self.queue_items[blend_file]
 
     def process_next_file(self):
         if not self.file_queue:
@@ -364,32 +400,57 @@ exit()
             # Convert the path to an absolute path
             self.output_dir = os.path.abspath(self.output_dir)
 
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.total_frames = self.end_frame - self.start_frame + 1
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
 
-        self.adjust_start_frame_based_on_existing_output()
+            # Continue with normal processing
+            self.total_frames = self.end_frame - self.start_frame + 1
+            self.adjust_start_frame_based_on_existing_output()
 
-        if self.start_frame > self.end_frame:
-            # Update UI to show this file was already rendered
+            if self.start_frame > self.end_frame:
+                # Update UI to show this file was already rendered
+                for i in range(self.queue_list.count()):
+                    item = self.queue_list.item(i)
+                    widget = self.queue_list.itemWidget(item)
+                    if widget and widget.file_path == blend_file:
+                        widget.label.setText(
+                            f"{os.path.basename(blend_file)} (Already rendered)"
+                        )
+                        widget.label.setStyleSheet("color: gray; font-style: italic;")
+                        break
+
+                # Move to next file in queue
+                self.currently_rendering = False
+                self.process_next_file()
+                return
+
+            self.label.setText(f"Processing {os.path.basename(blend_file)} currently")
+            self.current_blend_file = blend_file
+            self.crash_count = 0
+            self.start_render(blend_file)
+
+        except (OSError, PermissionError) as e:
+            # Handle errors creating output directory
+            error_message = f"Error accessing output directory: {str(e)}"
+            self.log_error(blend_file, error_message)
+
+            # Update queue status for this file
             for i in range(self.queue_list.count()):
                 item = self.queue_list.item(i)
                 widget = self.queue_list.itemWidget(item)
                 if widget and widget.file_path == blend_file:
                     widget.label.setText(
-                        f"{os.path.basename(blend_file)} (Already rendered)"
+                        f"{os.path.basename(blend_file)} (Failed with Error)"
                     )
-                    widget.label.setStyleSheet("color: gray; font-style: italic;")
+                    widget.label.setStyleSheet("color: red; font-weight: bold;")
                     break
 
-            # Move to next file in queue
+            # Display error in UI
+            self.frame_counter.setText(f"Error: {error_message}")
+
+            # Move to the next file
             self.currently_rendering = False
             self.process_next_file()
-            return
-
-        self.label.setText(f"Processing {os.path.basename(blend_file)} currently")
-        self.current_blend_file = blend_file
-        self.crash_count = 0
-        self.start_render(blend_file)
 
     def adjust_start_frame_based_on_existing_output(self):
         if not self.output_dir:
@@ -622,6 +683,37 @@ exit()
             hours = int(seconds / 3600)
             minutes = int((seconds % 3600) / 60)
             return f"{hours}h {minutes}m"
+
+    def log_error(self, blend_file, error_message):
+        """Create a log file next to the scene file with error details"""
+        try:
+            # Generate log filename based on scene filename
+            scene_dir = os.path.dirname(blend_file)
+            scene_basename = Path(blend_file).stem
+            log_file = os.path.join(scene_dir, f"{scene_basename}.log")
+
+            # Get timestamp for the log
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Create log content with error details
+            log_content = [
+                f"Error Log for {os.path.basename(blend_file)}",
+                f"Date: {timestamp}",
+                f"Error: {error_message}",
+                "Stack Trace:",
+                traceback.format_exc(),
+            ]
+
+            # Write to log file
+            with open(log_file, "w") as f:
+                f.write("\n".join(log_content))
+
+            print(f"Error log written to: {log_file}")
+        except Exception as e:
+            # If logging fails, just print to console - don't want to cascade errors
+            print(f"Failed to write error log: {str(e)}")
+            print(f"Original error was: {error_message}")
+            print(traceback.format_exc())
 
 
 if __name__ == "__main__":
