@@ -160,6 +160,12 @@ class DragDropWindow(QMainWindow):
         self.is_windows = platform.system() == "Windows"
         self.is_macos = platform.system() == "Darwin"
 
+        # Add counters for overall statistics
+        self.total_scenes_rendered = 0
+        self.total_frames_rendered = 0
+        self.total_render_time = 0
+        self.session_start_time = time.time()
+
     def setup_menu(self):
         setup_menu = QMenu("Setup", self)
         choose_blender_action = QAction("Choose Blender Path", self)
@@ -220,11 +226,26 @@ class DragDropWindow(QMainWindow):
             for blend_file in blend_files:
                 self.add_file_to_queue(blend_file)
 
+            # If this is a new batch after previous completion, reset overall statistics
+            if (
+                not self.currently_rendering
+                and self.total_scenes_rendered > 0
+                and not self.file_queue
+            ):
+                self.reset_overall_statistics()
+
             # Start processing if not already rendering
             if not self.currently_rendering:
                 self.process_next_file()
         else:
             event.ignore()
+
+    def reset_overall_statistics(self):
+        """Reset the overall statistics when starting a new batch"""
+        self.total_scenes_rendered = 0
+        self.total_frames_rendered = 0
+        self.total_render_time = 0
+        self.session_start_time = time.time()
 
     def add_file_to_queue(self, blend_file):
         # Check if file is already in queue
@@ -303,6 +324,10 @@ class DragDropWindow(QMainWindow):
         if not self.file_queue:
             self.currently_rendering = False
             self.label.setText("Drag one or more Blender files here")
+
+            # If we've rendered at least one scene, display overall statistics
+            if self.total_scenes_rendered > 0:
+                self.display_overall_statistics()
             return
 
         self.currently_rendering = True
@@ -386,7 +411,11 @@ exit()
                     self.image_format = fmt.lower()
 
         # Use the fallback (scene name + _output) if output dir is unset or just "//"
-        if not self.output_dir or self.output_dir == "//" or self.output_dir.endswith("OUTPUT_DIR"):
+        if (
+            not self.output_dir
+            or self.output_dir == "//"
+            or self.output_dir.endswith("OUTPUT_DIR")
+        ):
             self.output_dir = fallback_output
         else:
             # If the path starts with //, it's relative to the blend file directory
@@ -455,23 +484,73 @@ exit()
             self.process_next_file()
 
     def adjust_start_frame_based_on_existing_output(self):
-        if not self.output_dir:
+        if not self.output_dir or not os.path.exists(self.output_dir):
             return
-        existing_frames = [
+
+        # Get all image files in the output directory
+        existing_files = [
             f
             for f in os.listdir(self.output_dir)
-            if f.endswith(f".{self.image_format}") and f.startswith("frame_")
+            if f.lower().endswith(f".{self.image_format.lower()}")
         ]
-        frame_pattern = re.compile(rf"frame_(\d+)\.{re.escape(self.image_format)}")
-        max_frame = 0
-        for filename in existing_frames:
-            match = frame_pattern.match(filename)
-            if match:
-                frame_num = int(match.group(1))
-                max_frame = max(max_frame, frame_num)
-        if max_frame >= self.start_frame:
-            self.start_frame = max_frame + 1
-            self.total_frames = self.end_frame - self.start_frame + 1
+
+        if not existing_files:
+            return
+
+        # More robust pattern matching to handle different naming conventions
+        # This will handle both standard frames and stereoscopic images
+        frame_patterns = [
+            # Standard frame pattern (frame_001.png)
+            re.compile(rf".*?(\d+)\.{re.escape(self.image_format)}$", re.IGNORECASE),
+            # Left eye pattern (frame_001_L.png)
+            re.compile(rf".*?(\d+)_L\.{re.escape(self.image_format)}$", re.IGNORECASE),
+            # Right eye pattern (frame_001_R.png)
+            re.compile(rf".*?(\d+)_R\.{re.escape(self.image_format)}$", re.IGNORECASE),
+        ]
+
+        # Find all existing frame numbers
+        rendered_frames = set()
+        for filename in existing_files:
+            for pattern in frame_patterns:
+                match = pattern.match(filename)
+                if match:
+                    try:
+                        frame_num = int(match.group(1))
+                        rendered_frames.add(frame_num)
+                    except (ValueError, IndexError):
+                        continue
+
+        # Quick check if we have any rendered frames
+        if not rendered_frames:
+            return
+
+        # Rather than just taking the max frame, we need to find missing frames
+        missing_frames = []
+        for frame in range(self.start_frame, self.end_frame + 1):
+            if frame not in rendered_frames:
+                missing_frames.append(frame)
+                
+        # Now we can determine what to do based on missing frames
+        if not missing_frames:
+            # If there are no missing frames, all frames are rendered
+            self.start_frame = self.end_frame + 1
+            print("All frames already rendered")
+        else:
+            # Set start frame to the first missing frame
+            self.start_frame = missing_frames[0]
+            print(f"Found {len(missing_frames)} missing frames. Start rendering from frame {self.start_frame}")
+            
+            # If there are multiple non-consecutive missing frames, we'll need to pass this info to render_script
+            if len(missing_frames) > 1 and missing_frames[-1] - missing_frames[0] + 1 != len(missing_frames):
+                # Store missing frames for use in start_render
+                self.missing_frames = missing_frames
+                print(f"Missing frames are non-consecutive: {missing_frames[:10]}...")
+            else:
+                self.missing_frames = None
+            
+        # Update total frames to render
+        self.total_frames = max(0, self.end_frame - self.start_frame + 1)
+        print(f"Adjusted start frame to {self.start_frame}, approximately {self.total_frames} frames to render")
 
     def start_render(self, blend_file):
         if self.process:
@@ -500,6 +579,13 @@ exit()
             "true",
         ]
 
+        # If we detected non-consecutive missing frames, pass them to the render script
+        if hasattr(self, 'missing_frames') and self.missing_frames and len(self.missing_frames) > 1:
+            # Convert frame list to comma-separated string for passing as argument
+            missing_frames_str = ",".join(str(f) for f in self.missing_frames)
+            args.extend(["--missing_frames", missing_frames_str])
+            print(f"Passing list of {len(self.missing_frames)} missing frames to render script")
+
         self.process = QProcess(self)
         self.process.setProgram(blender_path)
         self.process.setArguments(args[1:])
@@ -520,10 +606,13 @@ exit()
         )
 
     def handle_stdout(self):
-        if not self.process or self.process.state() != QProcess.Running:
+        # Check if process exists and is still running before trying to read from it
+        if self.process is None or self.process.state() != QProcess.Running:
             return
+            
         try:
-            while self.process.canReadLine():
+            # Only read lines while the process is still running and has data
+            while self.process is not None and self.process.state() == QProcess.Running and self.process.canReadLine():
                 line = bytes(self.process.readLine()).decode(errors="replace").strip()
                 print(line)
                 if "Fra:" in line:
@@ -555,9 +644,13 @@ exit()
                     except Exception as e:
                         print(f"[ERROR parsing Fra:]: {e}")
                 if "[DONE]" in line:
-                    self.render_finished()
+                    # Call render_finished only if process still exists
+                    if self.process is not None:
+                        self.render_finished()
         except Exception as e:
-            print(f"Something threw an error while reading the output: {e}")
+            # More descriptive error message with less alarmist language
+            print(f"Error while reading process output: {e}")
+            # Continue execution - don't let this error stop the application
 
     def update_time_statistics(self):
         # Need at least one completed frame for calculations
@@ -612,10 +705,15 @@ exit()
 
         self.progress.setValue(self.progress.maximum())
 
-        # Calculate total render time and format it nicely
+        # Calculate total render time for this scene
         total_render_time = time.time() - self.render_start_time
         formatted_time = self.format_time_short(total_render_time)
         frames_rendered = self.end_frame - self.start_frame + 1
+
+        # Update overall statistics
+        self.total_scenes_rendered += 1
+        self.total_frames_rendered += frames_rendered
+        self.total_render_time += total_render_time
 
         # Update status for the completed file in the queue list with detailed stats
         for i in range(self.queue_list.count()):
@@ -628,6 +726,7 @@ exit()
                 widget.label.setStyleSheet("color: blue;")
                 break
 
+        # Display scene-specific completion info
         self.frame_counter.setText(
             f"Rendering finished!\n\n{frames_rendered} frames rendered to:\n{self.output_dir}\nCrashes: {self.crash_count}"
         )
@@ -643,8 +742,10 @@ exit()
         # Process next file in queue if any
         self.process_next_file()
 
+        # If no more files to render, display overall statistics
         if not self.currently_rendering:
             self.label.setText("Drag one or more Blender files here")
+            self.display_overall_statistics()
 
     def cancel_render(self):
         if self.process:
@@ -686,6 +787,19 @@ exit()
             minutes = int((seconds % 3600) / 60)
             return f"{hours}h {minutes}m"
 
+    def format_time_long(self, seconds):
+        """Format time in a more detailed way for final statistics"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+
+        if hours > 0:
+            return f"{hours} hours, {minutes} minutes, {secs} seconds"
+        elif minutes > 0:
+            return f"{minutes} minutes, {secs} seconds"
+        else:
+            return f"{secs} seconds"
+
     def log_error(self, blend_file, error_message):
         """Create a log file next to the scene file with error details"""
         try:
@@ -716,6 +830,26 @@ exit()
             print(f"Failed to write error log: {str(e)}")
             print(f"Original error was: {error_message}")
             print(traceback.format_exc())
+
+    def display_overall_statistics(self):
+        """Display overall rendering statistics when all scenes are rendered"""
+        # Calculate session duration
+        session_duration = time.time() - self.session_start_time
+        session_time_formatted = self.format_time_long(session_duration)
+        render_time_formatted = self.format_time_long(self.total_render_time)
+
+        # Create detailed statistics message
+        stats_message = (
+            f"All Rendering Complete!\n\n"
+            f"Total scenes rendered: {self.total_scenes_rendered}\n"
+            f"Total frames rendered: {self.total_frames_rendered}\n"
+            f"Total rendering time: {render_time_formatted}\n"
+            f"Session duration: {session_time_formatted}"
+        )
+
+        # Update the UI
+        self.frame_counter.setText(stats_message)
+        self.stats_label.setText("Rendering session completed")
 
 
 if __name__ == "__main__":
