@@ -31,14 +31,18 @@ from PySide6.QtGui import QAction, QIcon
 from PySide6.QtCore import Qt, QProcess, QSize
 
 # Get the application's base directory - important for PyInstaller compatibility
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     # If the application is run as a bundle (PyInstaller)
     APPLICATION_PATH = sys._MEIPASS
 else:
     # If running from script
     APPLICATION_PATH = os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_FILE = os.path.join(APPLICATION_PATH, "config.json") if getattr(sys, 'frozen', False) else "config.json"
+CONFIG_FILE = (
+    os.path.join(APPLICATION_PATH, "config.json")
+    if getattr(sys, "frozen", False)
+    else "config.json"
+)
 
 
 def load_config():
@@ -537,7 +541,7 @@ exit()
         for frame in range(self.start_frame, self.end_frame + 1):
             if frame not in rendered_frames:
                 missing_frames.append(frame)
-                
+
         # Now we can determine what to do based on missing frames
         if not missing_frames:
             # If there are no missing frames, all frames are rendered
@@ -546,19 +550,25 @@ exit()
         else:
             # Set start frame to the first missing frame
             self.start_frame = missing_frames[0]
-            print(f"Found {len(missing_frames)} missing frames. Start rendering from frame {self.start_frame}")
-            
+            print(
+                f"Found {len(missing_frames)} missing frames. Start rendering from frame {self.start_frame}"
+            )
+
             # If there are multiple non-consecutive missing frames, we'll need to pass this info to render_script
-            if len(missing_frames) > 1 and missing_frames[-1] - missing_frames[0] + 1 != len(missing_frames):
+            if len(missing_frames) > 1 and missing_frames[-1] - missing_frames[
+                0
+            ] + 1 != len(missing_frames):
                 # Store missing frames for use in start_render
                 self.missing_frames = missing_frames
                 print(f"Missing frames are non-consecutive: {missing_frames[:10]}...")
             else:
                 self.missing_frames = None
-            
+
         # Update total frames to render
         self.total_frames = max(0, self.end_frame - self.start_frame + 1)
-        print(f"Adjusted start frame to {self.start_frame}, approximately {self.total_frames} frames to render")
+        print(
+            f"Adjusted start frame to {self.start_frame}, approximately {self.total_frames} frames to render"
+        )
 
     def start_render(self, blend_file):
         if self.process:
@@ -571,9 +581,9 @@ exit()
         self.frame_times = []
 
         blender_path = self.config.get("blender_path", "")
-        
+
         # PyInstaller compatibility: Get the correct path to the render script
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, "frozen", False):
             # If running as PyInstaller bundle, extract render_script.py to a temporary location
             render_script = os.path.join(APPLICATION_PATH, "render_script.py")
             if not os.path.exists(render_script):
@@ -581,12 +591,12 @@ exit()
                 temp_render_script = tempfile.NamedTemporaryFile(
                     delete=False, suffix=".py", mode="w", encoding="utf8"
                 ).name
-                
+
                 # Extract render_script content from the bundle or embed it directly
                 try:
-                    with open(render_script, 'r', encoding='utf-8') as src_file:
+                    with open(render_script, "r", encoding="utf-8") as src_file:
                         script_content = src_file.read()
-                    with open(temp_render_script, 'w', encoding='utf-8') as dest_file:
+                    with open(temp_render_script, "w", encoding="utf-8") as dest_file:
                         dest_file.write(script_content)
                     render_script = temp_render_script
                     print(f"[INFO] Created temporary render script at: {render_script}")
@@ -597,18 +607,20 @@ exit()
                     return
         else:
             # If running as Python script, use the script in the current directory
-            render_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "render_script.py")
-        
+            render_script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "render_script.py"
+            )
+
         # Verify the render script exists
         if not os.path.exists(render_script):
             error_msg = f"Render script not found at: {render_script}"
             print(f"[ERROR] {error_msg}")
             QMessageBox.critical(self, "Render Script Error", error_msg)
             return
-        
+
         print(f"[INFO] Using render script at: {render_script}")
         print(f"[INFO] Using Blender at: {blender_path}")
-        
+
         args = [
             "-b",
             blend_file,
@@ -624,22 +636,30 @@ exit()
         ]
 
         # If we detected non-consecutive missing frames, pass them to the render script
-        if hasattr(self, 'missing_frames') and self.missing_frames and len(self.missing_frames) > 1:
+        if (
+            hasattr(self, "missing_frames")
+            and self.missing_frames
+            and len(self.missing_frames) > 1
+        ):
             # Convert frame list to comma-separated string for passing as argument
             missing_frames_str = ",".join(str(f) for f in self.missing_frames)
             args.extend(["--missing_frames", missing_frames_str])
-            print(f"Passing list of {len(self.missing_frames)} missing frames to render script")
+            print(
+                f"Passing list of {len(self.missing_frames)} missing frames to render script"
+            )
 
         try:
             self.process = QProcess(self)
-            self.process.setProcessChannelMode(QProcess.MergedChannels)  # Merge stdout and stderr
+            self.process.setProcessChannelMode(
+                QProcess.MergedChannels
+            )  # Merge stdout and stderr
             self.process.setProgram(blender_path)
             self.process.setArguments(args)
             self.process.readyReadStandardOutput.connect(self.handle_stdout)
             self.process.finished.connect(self.render_finished)
             self.process.errorOccurred.connect(self.handle_process_error)
             self.process.start()
-            
+
             # Check if process started successfully
             if not self.process.waitForStarted(3000):  # Wait up to 3 seconds
                 error_msg = f"Failed to start Blender process. Check if Blender path is correct: {blender_path}"
@@ -647,9 +667,11 @@ exit()
                 QMessageBox.critical(self, "Process Error", error_msg)
                 self.process = None
                 return
-                
-            print(f"[INFO] Blender process started with PID: {self.process.processId()}")
-            
+
+            print(
+                f"[INFO] Blender process started with PID: {self.process.processId()}"
+            )
+
             self.progress.setMinimum(0)
             self.progress.setMaximum(self.total_frames)
             self.progress.setValue(0)
@@ -676,26 +698,34 @@ exit()
             QProcess.Timedout: "Blender process timed out.",
             QProcess.WriteError: "Error writing to Blender process.",
             QProcess.ReadError: "Error reading from Blender process.",
-            QProcess.UnknownError: "Unknown error occurred with Blender process."
+            QProcess.UnknownError: "Unknown error occurred with Blender process.",
         }
-        
-        error_msg = error_messages.get(error, "An error occurred with the Blender process.")
+
+        error_msg = error_messages.get(
+            error, "An error occurred with the Blender process."
+        )
         print(f"[ERROR] Process error: {error_msg}")
-        
+
         # For crashed processes, try to restart rendering
         if error == QProcess.Crashed:
             self.crash_count += 1
-            print(f"[INFO] Blender crashed {self.crash_count} times. Attempting to restart from frame {self.current_frame}.")
+            print(
+                f"[INFO] Blender crashed {self.crash_count} times. Attempting to restart from frame {self.current_frame}."
+            )
             # Logic to restart rendering could be added here
 
     def handle_stdout(self):
         # Check if process exists and is still running before trying to read from it
         if self.process is None or self.process.state() != QProcess.Running:
             return
-            
+
         try:
             # Only read lines while the process is still running and has data
-            while self.process is not None and self.process.state() == QProcess.Running and self.process.canReadLine():
+            while (
+                self.process is not None
+                and self.process.state() == QProcess.Running
+                and self.process.canReadLine()
+            ):
                 line = bytes(self.process.readLine()).decode(errors="replace").strip()
                 print(line)
                 if "Fra:" in line:
