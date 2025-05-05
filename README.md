@@ -6,6 +6,9 @@ This guide shows you how to install, configure, and package the **Blender Drag &
 
 This tool was built with the assistance of Large Language Models (LLMs). While we've made every effort to ensure it works correctly, there might still be bugs or unexpected behaviors. Please report any issues you encounter.
 
+**Known Issues:** 
+- When packaged with PyInstaller, there may be problems executing Blender, particularly on Windows. See the troubleshooting section for workarounds.
+
 ---
 
 ## ❓ Why This Tool Exists
@@ -149,6 +152,29 @@ Let us know if you want help generating those configurations!
 - If the app doesn’t open:
   - Make sure Blender’s path is correctly set via the app's **Setup** menu.
   - Use a terminal to launch the executable and view logs.
+
+### PyInstaller Packaging Issues
+
+If the executable can't find the render script when packaged with PyInstaller:
+
+- Create a `.spec` file for better control:
+  ```bash
+  pyi-makespec --onefile --windowed BlenderRenderGui.py
+  ```
+
+- Edit the `BlenderRenderGui.spec` file and modify the `datas` list to include the render script:
+  ```python
+  datas=[
+      ('render_script.py', '.'),
+      ('config.json', '.') # Include if you have a default config
+  ],
+  ```
+
+- Then build using the spec file:
+  ```bash
+  pyinstaller --clean BlenderRenderGui.spec
+  ```
+
 - To include additional assets, use:
   ```bash
   pyinstaller --add-data "relative/path/to/file:destination" ...
