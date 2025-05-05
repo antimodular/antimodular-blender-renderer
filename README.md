@@ -2,6 +2,10 @@
 
 This guide shows you how to install, configure, and package the **Blender Drag & Drop Renderer** GUI as a standalone application for **Windows** and **macOS**.
 
+## ⚠️ Disclaimer
+
+This tool was built with the assistance of Large Language Models (LLMs). While we've made every effort to ensure it works correctly, there might still be bugs or unexpected behaviors. Please report any issues you encounter.
+
 ---
 
 ## ❓ Why This Tool Exists
