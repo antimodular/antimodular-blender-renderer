@@ -377,14 +377,16 @@ exit()
                 self.end_frame = int(line.split()[-1])
             elif "[PROBE] OUTPUT_DIR" in line:
                 output = line.split(" ", 2)[-1].strip()
-                if output and output != "//":
+                # Only use the output if it's not empty and not just "//"
+                if output and output != "//" and not output.endswith("OUTPUT_DIR"):
                     self.output_dir = output
             elif "[PROBE] OUTPUT_FORMAT" in line:
                 fmt = line.split(" ", 2)[-1].strip()
                 if fmt:
                     self.image_format = fmt.lower()
 
-        if not self.output_dir or self.output_dir == "//":
+        # Use the fallback (scene name + _output) if output dir is unset or just "//"
+        if not self.output_dir or self.output_dir == "//" or self.output_dir.endswith("OUTPUT_DIR"):
             self.output_dir = fallback_output
         else:
             # If the path starts with //, it's relative to the blend file directory
